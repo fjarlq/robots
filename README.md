@@ -4,6 +4,8 @@ This is the original source code to Allan R. Black's "robots" game,
 as [posted to the Usenet newsgroup net.sources.games][1] on May 28, 1985
 by Stephen J. Muir.
 
+It has been modified to build and run on Linux and OS X.
+
 As Muir [wrote at the time, in net.games][2]:
 
 > I have posted the game of "robots" to "net.sources.games" with the consent

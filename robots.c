@@ -10,10 +10,16 @@
 
 /* 1.7a modified by Stephen J. Muir at Lancaster University. */
 
-# include <curses.h>
+# include <ncurses.h>
 # include <signal.h>
 # include <pwd.h>
 # include <ctype.h>
+# include <stdarg.h>
+# include <stdlib.h>
+# include <string.h>
+# include <termios.h>
+# include <time.h>
+# include <unistd.h>
 # include <sys/file.h>
 
 # define MIN_ROBOTS	10
@@ -34,8 +40,8 @@
 # define MSGPOS		39
 # define RVPOS		51
 
-# define HOF_FILE	"/usr/games/lib/robots_hof"
-# define TMP_FILE	"/usr/games/lib/robots_tmp"
+# define HOF_FILE	"/var/games/robots_hof"
+# define TMP_FILE	"/var/games/robots_tmp"
 
 # define NUMSCORES	20
 # define NUMNAME	"Twenty"
@@ -44,9 +50,6 @@
 # define TEMP_NAME	"Week"
 
 # define MAXSTR		100
-
-extern char	*getlogin ();
-extern struct passwd	*getpwnam ();
 
 struct scorefile {
 	int	s_uid;
@@ -104,12 +107,13 @@ struct robot {
 
 int	seed;
 
-struct ltchars	ltc;
+#ifdef VDSUSP
+void nodsusp();
+static struct termios origtty;
+int is_dsusp_disabled = FALSE;
+#endif
 
-char	dsusp;
-
-int	_putchar();
-int	interrupt();
+void	interrupt(int signum);
 
 char	*forbidden [] =
 	{ "root",
@@ -122,12 +126,34 @@ char	*forbidden [] =
 	  "saturn",
 	  "sjm",
 	  "cosmos",
-	  0
+	  NULL
 	};
 
-main(argc,argv)
-	int argc;
-	char *argv[];
+void draw_screen(void);
+void put_robots(void);
+void command(void);
+char read_com(void);
+char readchar(void);
+void do_move(char dir);
+void put_dots(void);
+void erase_dots(void);
+void good_moves(void);
+int xinc(char dir);
+int yinc(char dir);
+void robots(void);
+void munch(void);
+void quit(bool eaten);
+void scoring(bool eaten);
+void record_score(bool eaten, char *fname, int max_days, char *type_str);
+void do_score(bool eaten, int fd, int max_days, char *type_str);
+void scorer(void);
+int rndx(void);
+int rndy(void);
+int rnd(int mod);
+int sign(int x);
+void msg(char *message, ...);
+
+int main(int argc, char *argv[])
 {
 	register char *x, **xx;
 	if(argc > 1) {
@@ -139,7 +165,7 @@ main(argc,argv)
 			}
 		}
 	}
-	if ((x = getlogin ()) == 0 || (pass = getpwnam (x)) == 0)
+	if ((x = getlogin ()) == NULL || (pass = getpwnam (x)) == NULL)
 	{ printf ("Who the hell are you?\n");
 	  exit (1);
 	}
@@ -149,16 +175,16 @@ main(argc,argv)
 		{ printf ("only individuals may play robots\n");
 		  exit (1);
 		}
-	seed = time(0)+pass->pw_uid;
+	seed = time(NULL)+pass->pw_uid;
+	setbuf(stdout, NULL);
 	signal(SIGQUIT,interrupt);
 	signal(SIGINT,interrupt);
 	initscr();
 	crmode();
 	noecho();
-	ioctl(1,TIOCGLTC,&ltc);
-	dsusp = ltc.t_dsuspc;
-	ltc.t_dsuspc = ltc.t_suspc;
-	ioctl(1,TIOCSLTC,&ltc);
+#ifdef VDSUSP
+	nodsusp();
+#endif
 	for(;;) {
 		count = 0;
 		running = FALSE;
@@ -185,8 +211,6 @@ main(argc,argv)
 			robots();
 			if(dead) munch();
 		}
-		if (!level)
-			nice (2);
 		msg("%d robots are now scrap heaps",max_robots);
 		leaveok(stdscr,FALSE);
 		move(my_y,my_x);
@@ -196,7 +220,7 @@ main(argc,argv)
 	}
 }
 
-draw_screen()
+void draw_screen(void)
 {
 	register int x, y;
 	clear();
@@ -210,7 +234,7 @@ draw_screen()
 	}
 }
 
-put_robots()
+void put_robots(void)
 {
 	register struct robot *r, *end;
 	register int x, y;
@@ -233,7 +257,7 @@ put_robots()
 	}
 }
 
-command()
+void command(void)
 {
 	register int x, y;
 retry:
@@ -366,7 +390,7 @@ retry:
 	refresh();
 }
 
-read_com()
+char read_com(void)
 {
 	if(count == 0) {
 		if (dots)
@@ -385,15 +409,14 @@ read_com()
 	return(com);
 }
 
-readchar()
+char readchar(void)
 {
 	static char buf[1];
 	while(read(0,buf,1) <= 0);
 	return(buf[0]);
 }
 
-do_move(dir)
-	char dir;
+void do_move(char dir)
 {
 	register int x, y;
 	new_x = my_x+xinc(dir);
@@ -420,7 +443,7 @@ do_move(dir)
 	}
 }
 
-put_dots()
+void put_dots(void)
 {
 	register int x, y;
 	for(x = my_x-dots; x <= my_x+dots; x++) {
@@ -435,7 +458,7 @@ put_dots()
 	}
 }
 
-erase_dots()
+void erase_dots(void)
 {
 	register int x, y;
 	for(x = my_x-dots; x <= my_x+dots; x++) {
@@ -450,7 +473,7 @@ erase_dots()
 	}
 }
 
-good_moves()
+void good_moves(void)
 {
 	register int x, y;
 	register int test_x, test_y;
@@ -481,11 +504,10 @@ good_moves()
 	} else {
 		a = "Forget it!";
 	}
-	mvprintw(LINES-1,MSGPOS,"%*.*-s",RVPOS-MSGPOS,RVPOS-MSGPOS,a);
+	mvprintw(LINES-1,MSGPOS,"%-*.*s",RVPOS-MSGPOS,RVPOS-MSGPOS,a);
 }
 
-xinc(dir)
-	char dir;
+int xinc(char dir)
 {
 	switch(dir) {
 	case 'h':
@@ -503,8 +525,7 @@ xinc(dir)
 	}
 }
 
-yinc(dir)
-	char dir;
+int yinc(char dir)
 {
 	switch(dir) {
 	case 'k':
@@ -522,7 +543,7 @@ yinc(dir)
 	}
 }
 
-robots()
+void robots(void)
 {
 	register struct robot *r, *end, *find;
 	end = &robot_list[max_robots];
@@ -569,7 +590,7 @@ robots()
 	}
 }
 
-munch()
+void munch(void)
 {
 	scorer();
 	msg("MUNCH! You're robot food");
@@ -581,39 +602,37 @@ munch()
 	quit(TRUE);
 }
 
-quit(eaten)
-	bool eaten;
+void quit(bool eaten)
 {
+#ifdef VDSUSP
+	if (is_dsusp_disabled) {
+		tcsetattr(0, TCSANOW, &origtty);
+		is_dsusp_disabled = FALSE;
+	}
+#endif
 	move(LINES-1,0);
 	refresh();
 	endwin();
 	putchar('\n');
-	ltc.t_dsuspc = dsusp;
-	ioctl(1,TIOCSLTC,&ltc);
 	scoring(eaten);
 	exit(0);
 }
 
-scoring(eaten)
-	bool eaten;
+void scoring(bool eaten)
 {
 	static char buf[MAXSTR];
 	sprintf(buf,"for this %s",TEMP_NAME);
 	record_score(eaten,TMP_FILE,TEMP_DAYS,buf);
 	printf("[Press return to continue]");
 	fflush(stdout);
-	gets(buf);
+	getchar();
 	record_score(eaten,HOF_FILE,0,"of All Time");
 }
 
-record_score(eaten,fname,max_days,type_str)
-	bool eaten;
-	char *fname;
-	int max_days;
-	char *type_str;
+void record_score(bool eaten, char *fname, int max_days, char *type_str)
 {
 	int fd;
-	int (*action)();
+	sig_t action;
 	action = signal(SIGINT,SIG_IGN);
 	if((fd = open(fname,2)) < 0) {
 		perror(fname);
@@ -629,33 +648,36 @@ record_score(eaten,fname,max_days,type_str)
 	signal(SIGINT,action);
 }
 
-do_score(eaten,fd,max_days,type_str)
-	bool eaten;
-	int fd, max_days;
-	char *type_str;
+void do_score(bool eaten, int fd, int max_days, char *type_str)
 {
 	register struct scorefile *position;
 	register int x;
 	register struct scorefile *remove, *sfile, *eof;
 	struct scorefile *oldest, *this;
-	char *so, *ts;
 	int uid, this_day, limit;
-	static char buf[20];
-	ts = buf;
-	this_day = max_days ? time(0)/SECSPERDAY : 0;
+	ssize_t nread;
+	this_day = max_days ? time(NULL)/SECSPERDAY : 0;
 	limit = this_day-max_days;
 	sfile = (struct scorefile *)(malloc(FILE_SIZE));
 	eof = &sfile[NUMSCORES];
-	this = 0;
+	this = NULL;
 	for(position = sfile; position < eof; position++) {
 		position->s_score = 0;
 		position->s_days = 0;
 	}
-	read(fd,sfile,FILE_SIZE);
-	remove = 0;
+	nread = read(fd,sfile,FILE_SIZE);
+	if (nread == -1) {
+		perror("Error: do_score: read");
+		return;
+	}
+	if (nread > 0 && nread != FILE_SIZE) {
+		fprintf(stderr, "Error: do_score: score file truncated (%zd != %zd)\n", nread, FILE_SIZE);
+		return;
+	}
+	remove = NULL;
 	if(score > 0) {
 		uid = pass->pw_uid;
-		oldest = 0;
+		oldest = NULL;
 		x = limit;
 		for(position = eof-1; position >= sfile; position--) {
 			if(position->s_days < x) {
@@ -663,9 +685,9 @@ do_score(eaten,fd,max_days,type_str)
 				oldest = position;
 			}
 		}
-		position = 0;
+		position = NULL;
 		for(remove = sfile; remove < eof; remove++) {
-			if(position == 0 && score > remove->s_score) position = remove;
+			if(position == NULL && score > remove->s_score) position = remove;
 # ifndef ALLSCORES
 			if (remove->s_uid == uid)
 			{ if (remove->s_days < limit)
@@ -673,13 +695,13 @@ do_score(eaten,fd,max_days,type_str)
 			  else
 			 	break;
 			}
-# endif ALLSCORES
+# endif
 		}
 		if(remove < eof) {
-			if(position == 0 && remove->s_days < limit) position = remove;
+			if(position == NULL && remove->s_days < limit) position = remove;
 		} else if(oldest) {
 			remove = oldest;
-			if(position == 0) {
+			if(position == NULL) {
 				position = eof-1;
 			} else if(remove < position) {
 				position--;
@@ -706,17 +728,18 @@ do_score(eaten,fd,max_days,type_str)
 			position->s_uid = uid;
 			position->s_days = this_day;
 			this = position;
-			lseek(fd,0,0);
-			write(fd,sfile,FILE_SIZE);
+			if (lseek(fd,0,0) == -1L ||
+			    write(fd,sfile,FILE_SIZE) != FILE_SIZE)
+				perror("scorefile");
 			close(fd);
 		}
 	}
 	printf(
 # ifdef ALLSCORES
 		"\nTop %s Scores %s:\n",
-# else ALLSCORES
+# else
 		"\nTop %s Robotists %s:\n",
-# endif ALLSCORES
+# endif
 		NUMNAME,
 		type_str
 	);
@@ -724,9 +747,10 @@ do_score(eaten,fd,max_days,type_str)
 	count = 0;
 	for(position = sfile; position < eof; position++) {
 		if(position->s_score == 0) break;
-		if(position == this && SO && SE) {
-			tputs(SO,0,_putchar);
-		}
+		if(position == this) {
+			putchar('>');
+		} else
+			putchar(' ');
 		if (position->s_days >= limit)
 		{ printf ("%-6d %-8d %s: %s on level %d.",
 			  ++count,
@@ -743,19 +767,19 @@ do_score(eaten,fd,max_days,type_str)
 			  position->s_eaten ? "eaten" : "chickened out",
 			  position->s_level
 			 );
-# endif OLDSCORES
+# endif
 		}
-		if(position == this && SO && SE) {
-			tputs(SE,0,_putchar);
+		if(position == this) {
+			putchar('<');
 		}
 # ifndef OLDSCORES
 		if (position->s_days >= limit)
-# endif OLDSCORES
+# endif
 			putchar ('\n');
 	}
 }
 
-scorer()
+void scorer(void)
 {
 	static char	infobuf [6];
 	register int	x, y;
@@ -771,48 +795,62 @@ scorer()
 	mvprintw(LINES-1,RVPOS,"robots: %d    value: %d",robots_alive,robot_value);
 }
 
-rndx()
+int rndx(void)
 {
 	return(rnd(COLS-2)+1);
 }
 
-rndy()
+int rndy(void)
 {
 	return(rnd(LINES-3)+1);
 }
 
-rnd(mod)
-	int mod;
+int rnd(int mod)
 {
 	if(mod <= 0) return(0);
 	return((((seed = seed*11109+13849) >> 16) & 0xffff) % mod);
 }
 
-sign(x)
-	register int x;
+int sign(int x)
 {
 	if(x < 0) return(-1);
 	return(x > 0);
 }
 
-msg(message,args)
-	char *message;
-	int args;
+void msg(char *message, ...)
 {
-	register int x;
-	static FILE msgpr;
 	static char msgbuf[1000];
-	msgpr._flag = _IOSTRG | _IOWRT;
-	msgpr._ptr = msgbuf;
-	msgpr._cnt = 1000;
-	_doprnt(message,&args,&msgpr);
-	putc(0,&msgpr);
+	va_list args;
+	va_start(args, message);
+	vsprintf(msgbuf, message, args);
+	va_end(args);
 	mvaddstr(LINES-1,MSGPOS,msgbuf);
 	clrtoeol();
 	refresh();
 }
 
-interrupt()
+void interrupt(int signum)
 {
+	(void)signum;
 	quit(FALSE);
 }
+
+#ifdef VDSUSP
+void nodsusp(void)
+{
+	struct termios tty;
+	if (tcgetattr(0, &origtty) == -1) {
+		perror("tcgetattr");
+		quit(FALSE);
+		return;
+	}
+	tty = origtty;
+	tty.c_cc[VDSUSP] = _POSIX_VDISABLE;
+	if (tcsetattr(0, TCSANOW, &tty) == -1) {
+		perror("tcsetattr");
+		quit(FALSE);
+		return;
+	}
+	is_dsusp_disabled = TRUE;
+}
+#endif

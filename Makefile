@@ -1,14 +1,16 @@
-robots:		robots.c
-		cc -O robots.c -o robots -lcurses -ltermcap
+CFLAGS = -O2 -Wall -Wextra
+
+robots:		robots.o
+		$(CC) robots.c -o robots -lncurses
 
 install:	robots
-		cp robots.6 /usr/man/man6/robots.6
-		install -s -m 4111 robots /usr/games/robots
-		touch /usr/games/lib/robots_hof
-		touch /usr/games/lib/robots_tmp
+		install robots.6 /usr/share/man/man6/robots.6
+		install robots /usr/games/robots
+		touch /var/games/robots_hof
+		touch /var/games/robots_tmp
 
 clean:
-		rm -f robots *.o
+		$(RM) robots robots.o
 
 lint:
 		lint -phbxac robots.c -lcurses -ltermcap > linterrs
